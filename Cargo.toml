@@ -1,0 +1,12 @@
+[package]
+name = "bro"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustacuda = "0.1.3"
+ctrlc = "3"
+
+[[bin]]
+name = "bro"
+path = "main.rs"
