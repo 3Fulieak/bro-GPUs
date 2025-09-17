@@ -14,6 +14,48 @@ use std::thread;
 use std::sync::Arc;
 use std::io::Write;
 use std::io::IsTerminal;
+use sha2::{Digest, Sha256};
+
+fn sha256d_hex(msg: &[u8]) -> String {
+    let first = Sha256::digest(msg);
+    let second = Sha256::digest(&first);
+    // 手写 hex，避免再引入 hex crate
+    const TBL: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for b in second {
+        out.push(TBL[(b >> 4) as usize] as char);
+        out.push(TBL[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn build_message(base: &[u8], nonce: u64, binary_nonce: bool) -> Vec<u8> {
+    let mut v = Vec::with_capacity(base.len() + 20);
+    v.extend_from_slice(base);
+    if binary_nonce {
+        // 注意：这里采用小端。如你的 kernel 用大端，请改成 to_be_bytes()
+        v.extend_from_slice(&nonce.to_le_bytes());
+    } else {
+        v.extend_from_slice(nonce.to_string().as_bytes());
+    }
+    v
+}
+
+fn print_improvement_json(base: &[u8], nonce: u64, best_lz: u32, binary_nonce: bool) {
+    let msg = build_message(base, nonce, binary_nonce);
+    let h = sha256d_hex(&msg);
+    let challenge = std::str::from_utf8(base).unwrap_or("<non-utf8>");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    // 单行 JSON，适合日志系统
+    println!(
+        r#"{{"nonce":{},"hash":"{}","bestHash":"{}","bestNonce":{},"bestLeadingZeros":{},"challenge":"{}","timestamp":{}}}"#,
+        nonce, h, h, nonce, best_lz, challenge, ts
+    );
+}
 
 #[derive(Clone, Debug)]
 struct GpuConfig {
@@ -139,6 +181,8 @@ fn run_on_device(device_idx: u32, fixed: &[u8], cfg: &GpuConfig, shared: Option<
             // Optional progress monitor loop (non-blocking to compute stream)
             if let Some(_prog_stream) = &progress_stream {
                 let mut last = 0u64;
+                let mut last_printed_lz: u32 = 0; // ← 新增：记录已经打印过的 best_lz
+
                 loop {
                     sleep(Duration::from_millis(cfg.progress_ms));
                     if STOP.load(Ordering::SeqCst) {
@@ -147,6 +191,21 @@ fn run_on_device(device_idx: u32, fixed: &[u8], cfg: &GpuConfig, shared: Option<
                     }
                     let mut done: u64 = 0;
                     d_next_index.copy_to(&mut done)?;
+                            // 读取 live 最优
+                    let mut live_lz: u32 = 0;
+                    let mut live_nonce: u64 = 0;
+                    d_best_lz_live.copy_to(&mut live_lz)?;
+                    d_best_nonce_live.copy_to(&mut live_nonce)?;
+                            // 只要更优（leading zeros 变大），立即打印一行 JSON
+                    if live_lz > last_printed_lz {
+                        print_improvement_json(
+                            fixed,
+                            live_nonce,
+                            live_lz,
+                            cfg.binary_nonce != 0
+                        );
+                        last_printed_lz = live_lz;
+                    }
                     if let Some(st) = &shared {
                         if done != last {
                             let mut live_lz: u32 = 0;
@@ -237,6 +296,13 @@ fn run_on_device(device_idx: u32, fixed: &[u8], cfg: &GpuConfig, shared: Option<
                 if batch_lz > best_lz {
                     best_lz = batch_lz;
                     best_nonce = batch_nonce_best;
+                        // ← 新增：发现更优解时打印
+                    print_improvement_json(
+                        fixed,
+                        best_nonce,
+                        best_lz,
+                        cfg.binary_nonce != 0
+                    );
                 }
 
                 if batch_idx % 10 == 0 || batch_idx + 1 == num_batches {
@@ -260,6 +326,7 @@ fn run_on_device(device_idx: u32, fixed: &[u8], cfg: &GpuConfig, shared: Option<
 
 static STOP: AtomicBool = AtomicBool::new(false);
 // Batch 4300 done, current best_lz=41 nonce=1928769793666 current=4300000000000
+
 fn parse_env_u64(key: &str, default: u64) -> u64 {
     if let Ok(raw) = env::var(key) {
         // Fast path: plain integer
