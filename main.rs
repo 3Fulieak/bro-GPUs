@@ -42,6 +42,15 @@ fn build_message(base: &[u8], nonce: u64, binary_nonce: bool) -> Vec<u8> {
 }
 
 fn print_improvement_json(base: &[u8], nonce: u64, best_lz: u32, binary_nonce: bool) {
+    use std::io::{self, Write};
+
+    // 1) 先把“进度行”清掉，避免 JSON 接在进度行尾部
+    // 在 TTY 下：回到行首 + ANSI 清行（Windows 10+ 及大多数终端支持）
+    if io::stdout().is_terminal() {
+        print!("\r\x1b[2K");
+    }
+
+    // 2) 计算 hash 并打印「单独一行」JSON
     let msg = build_message(base, nonce, binary_nonce);
     let h = sha256d_hex(&msg);
     let challenge = std::str::from_utf8(base).unwrap_or("<non-utf8>");
@@ -50,12 +59,13 @@ fn print_improvement_json(base: &[u8], nonce: u64, best_lz: u32, binary_nonce: b
         .unwrap_or_default()
         .as_millis() as u64;
 
-    // 单行 JSON，适合日志系统
     println!(
         r#"{{"nonce":{},"hash":"{}","bestHash":"{}","bestNonce":{},"bestLeadingZeros":{},"challenge":"{}","timestamp":{}}}"#,
         nonce, h, h, nonce, best_lz, challenge, ts
     );
+    let _ = io::stdout().flush();
 }
+
 
 #[derive(Clone, Debug)]
 struct GpuConfig {
@@ -571,3 +581,4 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+
